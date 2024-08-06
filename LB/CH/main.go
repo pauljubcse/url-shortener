@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -23,6 +25,12 @@ const (
 	ServerFailure
 	ServerMaintenance
 )
+
+type UrlResponse struct {
+	LongUrl  string `json:"longUrl"`
+	ShortUrl string `json:"shortUrl"`
+	GloablID int64  `json:"globalID"`
+}
 
 // String returns the string representation of the EventType.
 func (et EventType) String() string {
@@ -152,6 +160,197 @@ func root(w http.ResponseWriter, req *http.Request) { //Worker Go Routine
 	}
 }
 
+func postLongUrl(w http.ResponseWriter, req *http.Request) {
+	// Create an HTTP client with a timeout
+	relay := &http.Client{
+		Timeout: time.Duration(lb.backendTimeout) * time.Second,
+	}
+
+	// Get a backend server
+	backend, err := lb.getNextBackend(req.RemoteAddr)
+	if err != nil {
+		http.Error(w, "Failed to get backend", http.StatusInternalServerError)
+		return
+	}
+	fmt.Println("Selected backend:", backend)
+
+	// Parse the longUrl query parameter from the incoming request
+	longUrl := req.URL.Query().Get("longUrl")
+	if longUrl == "" {
+		http.Error(w, "Missing longUrl parameter at Load Balancer", http.StatusBadRequest)
+		return
+	}
+
+	// Create a new request for the backend server
+	backendURL := fmt.Sprintf("http://%s/post?longUrl=%s", backend, longUrl)
+	fmt.Println(backendURL)
+	backendReq, err := http.NewRequest(req.Method, backendURL, req.Body)
+	if err != nil {
+		fmt.Println("Error creating backend request:", err)
+		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+		return
+	}
+
+	// Copy headers from the original request to the new request
+	for header, values := range req.Header {
+		for _, value := range values {
+			backendReq.Header.Add(header, value)
+		}
+	}
+
+	// Perform the request to the backend server
+	resp, err := relay.Do(backendReq)
+	if err != nil {
+		fmt.Println("Error performing backend request:", err)
+		http.Error(w, "Backend didn't respond in time", http.StatusGatewayTimeout)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Write the status code and response body to the client
+	w.WriteHeader(resp.StatusCode)
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		http.Error(w, "Failed to get response", http.StatusInternalServerError)
+	}
+}
+
+// func getLongUrl(w http.ResponseWriter, req *http.Request) {
+// 	// Create an HTTP client with a timeout
+// 	relay := &http.Client{
+// 		Timeout: time.Duration(lb.backendTimeout) * time.Second,
+// 	}
+
+// 	// Get a backend server
+// 	backend, err := lb.getNextBackend(req.RemoteAddr)
+// 	if err != nil {
+// 		http.Error(w, "Failed to get backend", http.StatusInternalServerError)
+// 		return
+// 	}
+// 	fmt.Println("Selected backend:", backend)
+
+// 	// Parse the shortUrl query parameter from the incoming request
+// 	shortUrl := req.URL.Query().Get("shortUrl")
+// 	if shortUrl == "" {
+// 		http.Error(w, "Missing shortUrl parameter at LB", http.StatusBadRequest)
+// 		return
+// 	}
+
+// 	// Create a new request for the backend server
+// 	backendURL := fmt.Sprintf("http://%s/query?shortUrl=%s", backend, shortUrl)
+// 	backendReq, err := http.NewRequest(http.MethodGet, backendURL, nil)
+// 	if err != nil {
+// 		fmt.Println("Error creating backend request:", err)
+// 		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+// 		return
+// 	}
+
+// 	// Copy headers from the original request to the new request
+// 	for header, values := range req.Header {
+// 		for _, value := range values {
+// 			backendReq.Header.Add(header, value)
+// 		}
+// 	}
+
+// 	// Perform the request to the backend server
+// 	resp, err := relay.Do(backendReq)
+// 	if err != nil {
+// 		fmt.Println("Error performing backend request:", err)
+// 		http.Error(w, "Backend didn't respond in time", http.StatusGatewayTimeout)
+// 		return
+// 	}
+// 	defer resp.Body.Close()
+
+// 	if resp.StatusCode != http.StatusOK {
+// 		http.Error(w, "Failed to get long URL", resp.StatusCode)
+// 		return
+// 	}
+
+// 	body, err := ioutil.ReadAll(resp.Body)
+// 	if err != nil {
+// 		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+// 		return
+// 	}
+
+// 	var urlResp UrlResponse
+// 	err = json.Unmarshal(body, &urlResp)
+// 	if err != nil {
+// 		http.Error(w, "Failed to unmarshal response", http.StatusInternalServerError)
+// 		return
+// 	}
+
+// 	// Redirect to the long URL
+// 	http.Redirect(w, req, urlResp.LongUrl, http.StatusFound)
+// }
+
+func getLongUrl(w http.ResponseWriter, req *http.Request) {
+	// Extract shortUrl from the URL path
+	shortUrl := strings.TrimPrefix(req.URL.Path, "/")
+	if shortUrl == "" {
+		http.Error(w, "Missing shortUrl in path at LB", http.StatusBadRequest)
+		return
+	}
+
+	// Create an HTTP client with a timeout
+	relay := &http.Client{
+		Timeout: time.Duration(lb.backendTimeout) * time.Second,
+	}
+
+	// Get a backend server
+	backend, err := lb.getNextBackend(req.RemoteAddr)
+	if err != nil {
+		http.Error(w, "Failed to get backend", http.StatusInternalServerError)
+		return
+	}
+	fmt.Println("Selected backend:", backend)
+
+	// Create a new request for the backend server
+	backendURL := fmt.Sprintf("http://%s/query?shortUrl=%s", backend, shortUrl)
+	backendReq, err := http.NewRequest(http.MethodGet, backendURL, nil)
+	if err != nil {
+		fmt.Println("Error creating backend request:", err)
+		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+		return
+	}
+
+	// Copy headers from the original request to the new request
+	for header, values := range req.Header {
+		for _, value := range values {
+			backendReq.Header.Add(header, value)
+		}
+	}
+
+	// Perform the request to the backend server
+	resp, err := relay.Do(backendReq)
+	if err != nil {
+		fmt.Println("Error performing backend request:", err)
+		http.Error(w, "Backend didn't respond in time", http.StatusGatewayTimeout)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "Failed to get long URL", resp.StatusCode)
+		return
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		return
+	}
+
+	var urlResp UrlResponse
+	err = json.Unmarshal(body, &urlResp)
+	if err != nil {
+		http.Error(w, "Failed to unmarshal response", http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect to the long URL
+	http.Redirect(w, req, urlResp.LongUrl, http.StatusFound)
+}
+
 // general purpose function for receiving events via websocket
 func receiveEvent(conn *websocket.Conn) (Event, error) {
 	var event Event
@@ -234,7 +433,9 @@ func main() {
 	}
 
 	//to relay requests to backend servers
-	http.HandleFunc("/", root)
+	http.HandleFunc("/hello", root)
+	http.HandleFunc("/postLongUrl", postLongUrl)
+	http.HandleFunc("/", getLongUrl)
 	srv := &http.Server{
 		Addr:         ":8090",
 		ReadTimeout:  time.Duration(lb.readTimeout) * time.Second,

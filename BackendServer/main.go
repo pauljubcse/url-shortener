@@ -197,10 +197,10 @@ func main() {
 	// Start HTTP server
 	http.HandleFunc("/post", func(w http.ResponseWriter, r *http.Request) {
 		//fmt.Fprintf(w, "Hello from %s", IP+port)
-		longUrl := r.Header.Get("longUrl")
+		longUrl := r.URL.Query().Get("longUrl")
 		fmt.Println(longUrl)
 		if longUrl == "" {
-			http.Error(w, "Missing longUrl parameter", http.StatusBadRequest)
+			http.Error(w, "Missing longUrl parameter at Load Balancer", http.StatusBadRequest)
 			return
 		}
 
@@ -254,7 +254,7 @@ func main() {
 	http.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
 		shortUrl := r.URL.Query().Get("shortUrl")
 		if shortUrl == "" {
-			http.Error(w, "Missing shortUrl parameter", http.StatusBadRequest)
+			http.Error(w, "Missing shortUrl parameter at Backend Server", http.StatusBadRequest)
 			return
 		}
 
@@ -274,11 +274,14 @@ func main() {
 		//http.Error(w, "No active shard or replica found", http.StatusInternalServerError)
 		//return
 		//}
+
+		//Issue: dbMap shared by serviceregistry is not showing correct active status
+
 		readServerAddress = shardID.ReadServerAddressMap[int(shardIDDecoded)].ReadServerAddress //Check Original first
 		readUrl := fmt.Sprintf("http://%s/queryByShortUrl?shortUrl=%s", readServerAddress, shortUrl)
 		resp, err := http.Get(readUrl)
 		if err != nil || resp.StatusCode != http.StatusOK {
-			http.Error(w, "Failed to get response from read server", http.StatusInternalServerError)
+			//http.Error(w, "Failed to get response from read server", http.StatusInternalServerError)
 
 			readServerAddress = shardID.ReadServerAddressMap[int(replicaID)].ReadServerAddress //Check Replica
 			readUrl := fmt.Sprintf("http://%s/queryByShortUrl?shortUrl=%s", readServerAddress, shortUrl)
@@ -312,6 +315,9 @@ func main() {
 
 	})
 
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Hello from %s", IP+port)
+	})
 	//port := ":9090" // Define the port you want to use
 	fmt.Printf("HTTP server started on %s\n", port)
 	log.Fatal(http.ListenAndServe(port, nil))

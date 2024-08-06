@@ -295,13 +295,14 @@ func getServices(w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
-	log.Println("Connection established")
+	log.Println("LB Connection established")
 	defer LBConn.Close()
 
 	handleLoadBalancerConnection(LBConn)
 }
 
 func handleLoadBalancerConnection(LBConn *websocket.Conn) {
+
 	defer func() {
 		LBConn.Close()
 		log.Printf("LB disconnected")
