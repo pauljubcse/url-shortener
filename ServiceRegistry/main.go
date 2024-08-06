@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,8 +105,10 @@ type DBService struct {
 	active   bool
 	// IP        string
 	// Port      string
-	Address   string
-	TableName string
+	Address           string //This is the ws connection
+	ReadServerPort    string
+	ReadServerAddress string //Read Server
+	TableName         string
 }
 
 // RequestBody struct to parse the request body
@@ -186,7 +189,8 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 type DBShardID struct {
-	ID int `json:"id"`
+	ID                   int               `json:"id"`
+	ReadServerAddressMap map[int]DBService `json:"readServerAddressMap"`
 }
 
 // handleWebSocketConnection handles the WebSocket connection with backendServer and removes it from the services map on disconnection
@@ -214,7 +218,8 @@ func handleWebSocketConnection(service Service, backendConn *websocket.Conn) {
 		}
 		err := backendConn.WriteJSON(
 			DBShardID{
-				ID: ID,
+				ID:                   ID,
+				ReadServerAddressMap: dbMap,
 			})
 		if err != nil {
 			log.Println("Cant Send Shard ID")
@@ -251,6 +256,7 @@ func handleWebSocketConnectionDB(db DBService, dbConn *websocket.Conn) {
 		}
 		fmt.Println(db.shardID, info.NumRows)
 		db.rowCount = info.NumRows
+		db.active = true
 		dbMap[db.shardID] = db
 	}
 
@@ -349,6 +355,17 @@ func findDBConnStr(r *http.Request) string {
 func findTableName(r *http.Request) string {
 	return r.Header.Get("table-name")
 }
+func findReadServerPort(r *http.Request) string {
+	return r.Header.Get("read-server-port")
+}
+func extractIP(ipPort string) (string, error) {
+	// Split the string by the colon
+	parts := strings.Split(ipPort, ":")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid format: expected ip:port, got %s", ipPort)
+	}
+	return parts[0], nil
+}
 
 // handle DB events
 func handleDBRegister(w http.ResponseWriter, r *http.Request) {
@@ -374,26 +391,38 @@ func handleDBRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "table-name not found", http.StatusBadRequest)
 		return
 	}
+	readServerPort := findReadServerPort(r)
+	if readServerPort == "" {
+		http.Error(w, "read-server-port not found", http.StatusBadRequest)
+		return
+	}
 	Address := r.RemoteAddr
+	IP, err := extractIP(Address)
+	if err != nil {
+		IP = ""
+	}
+	readServerAddress := IP + readServerPort
 	// clientHTTPPort := findClientPort(r)
 	// if clientHTTPPort == "" {
 	// 	http.Error(w, "client-http-port header not found", http.StatusBadRequest)
 	// 	return
 	// }
 
-	log.Printf("shard-id: %s, db-conn-str %s, table-name: %s, address: %s\n", shardID, dbconnstr, tableName, Address)
+	log.Printf("shard-id: %s, db-conn-str %s, table-name: %s, read-server-address: %s\n", shardID, dbconnstr, tableName, readServerAddress)
 	dbConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 	db := DBService{
-		shardID:   shardIDInt,
-		Conn:      dbConn,
-		rowCount:  0,
-		active:    true,
-		TableName: tableName,
-		Address:   Address,
+		shardID:           shardIDInt,
+		Conn:              dbConn,
+		rowCount:          0,
+		active:            true,
+		TableName:         tableName,
+		Address:           Address,
+		ReadServerPort:    readServerPort,
+		ReadServerAddress: readServerAddress,
 	}
 	dbsMu.Lock()
 	//dbs = append(dbs, db)
@@ -414,12 +443,15 @@ func pingDBs() {
 		}
 
 		sort.Slice(dbs, func(i, j int) bool {
+			if dbs[i].rowCount == dbs[j].rowCount {
+				return int64(dbs[i].shardID) > int64(dbs[j].shardID)
+			}
 			return dbs[i].rowCount < dbs[j].rowCount
 		})
 
 		dbsMu.Unlock()
 		fmt.Println(dbs)
-
+		fmt.Println(dbMap)
 		time.Sleep(5 * time.Second)
 	}
 }

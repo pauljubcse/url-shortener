@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,19 @@ const (
 	timestampShift = machineIDBits + sequenceBits
 	machineIDShift = sequenceBits
 )
+
+type DBService struct {
+	Conn     *websocket.Conn
+	shardID  int
+	rowCount int64
+	active   bool
+	// IP        string
+	// Port      string
+	Address           string //This is the ws connection
+	ReadServerPort    string
+	ReadServerAddress string //Read Server
+	TableName         string
+}
 
 // IDGenerator is responsible for generating unique IDs
 type IDGenerator struct {
@@ -85,8 +99,10 @@ func failOnError(err error, msg string) {
 }
 
 type DBShardID struct {
-	ID int `json:"id"`
+	ID                   int               `json:"id"`
+	ReadServerAddressMap map[int]DBService `json:"readServerAddressMap"`
 }
+
 type UrlMessage struct {
 	ShortUrl string `json:"shortUrl"`
 	LongUrl  string `json:"longUrl"`
@@ -105,6 +121,13 @@ func EncodeBase62(num int64) string {
 		num /= 62
 	}
 	return result
+}
+func DecodeBase62(s string) int64 {
+	var num int64
+	for _, c := range s {
+		num = num*62 + int64(strings.IndexRune(base62Charset, c))
+	}
+	return num
 }
 func main() {
 	// The server URL
@@ -172,8 +195,8 @@ func main() {
 	}()
 
 	// Start HTTP server
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Hello from %s", IP+port)
+	http.HandleFunc("/post", func(w http.ResponseWriter, r *http.Request) {
+		//fmt.Fprintf(w, "Hello from %s", IP+port)
 		longUrl := r.Header.Get("longUrl")
 		fmt.Println(longUrl)
 		if longUrl == "" {
@@ -224,7 +247,69 @@ func main() {
 		failOnError(err, fmt.Sprintf("Failed to publish replication message to consumer %d", nextConsumer))
 		log.Printf("Sent: %s", messageBody)
 
-		fmt.Fprintf(w, "Short URL: %s\nLong URL: %s\nTimestamp: %d", shortUrl, longUrl, generatedID)
+		//fmt.Fprintf(w, "Short URL: %s\nLong URL: %s\nTimestamp: %d", shortUrl, longUrl, generatedID)
+		fmt.Fprintf(w, "%s", shortUrl)
+	})
+	// HTTP endpoint to query by short URL
+	http.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
+		shortUrl := r.URL.Query().Get("shortUrl")
+		if shortUrl == "" {
+			http.Error(w, "Missing shortUrl parameter", http.StatusBadRequest)
+			return
+		}
+
+		shardIDDecoded := DecodeBase62(string(shortUrl[0]))
+		replicaID := shardIDDecoded + 1
+		fmt.Println("Target ShardID: ", shardIDDecoded)
+		var readServerAddress string
+		//var active bool
+		//fmt.Println(shardID.ReadServerAddressMap[int(shardIDDecoded)])
+		//if shardID.ReadServerAddressMap[int(shardIDDecoded)].active {
+		//readServerAddress = shardID.ReadServerAddressMap[int(shardIDDecoded)].ReadServerAddress
+		//active = true
+		//} else if shardID.ReadServerAddressMap[int(replicaID)].active {
+		//readServerAddress = shardID.ReadServerAddressMap[int(replicaID)].ReadServerAddress
+		//active = true
+		//} else {
+		//http.Error(w, "No active shard or replica found", http.StatusInternalServerError)
+		//return
+		//}
+		readServerAddress = shardID.ReadServerAddressMap[int(shardIDDecoded)].ReadServerAddress //Check Original first
+		readUrl := fmt.Sprintf("http://%s/queryByShortUrl?shortUrl=%s", readServerAddress, shortUrl)
+		resp, err := http.Get(readUrl)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			http.Error(w, "Failed to get response from read server", http.StatusInternalServerError)
+
+			readServerAddress = shardID.ReadServerAddressMap[int(replicaID)].ReadServerAddress //Check Replica
+			readUrl := fmt.Sprintf("http://%s/queryByShortUrl?shortUrl=%s", readServerAddress, shortUrl)
+			resp, err := http.Get(readUrl)
+			if err != nil {
+				http.Error(w, "Failed to get response from read server", http.StatusInternalServerError)
+				return
+			}
+			var urlMessage UrlMessage
+			if err := json.NewDecoder(resp.Body).Decode(&urlMessage); err != nil {
+				http.Error(w, "Failed to decode response from read server", http.StatusInternalServerError)
+				return
+			}
+			fmt.Println("Response: ", urlMessage)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(urlMessage)
+
+			//active = true
+			return
+		}
+		var urlMessage UrlMessage
+		if err := json.NewDecoder(resp.Body).Decode(&urlMessage); err != nil {
+			http.Error(w, "Failed to decode response from read server", http.StatusInternalServerError)
+			return
+		}
+		fmt.Println("Response: ", urlMessage)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(urlMessage)
+
+		defer resp.Body.Close()
+
 	})
 
 	//port := ":9090" // Define the port you want to use

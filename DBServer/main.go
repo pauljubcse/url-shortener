@@ -39,15 +39,82 @@ type UrlMessage struct {
 	GlobalID int64  `json:"globalID"`
 }
 
+func queryByShortUrl(db *sql.DB, table string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shortUrl := r.URL.Query().Get("shortUrl")
+		if shortUrl == "" {
+			http.Error(w, "Missing shortUrl parameter", http.StatusBadRequest)
+			return
+		}
+
+		var longUrl string
+		query := fmt.Sprintf("SELECT long_url FROM %s WHERE short_url = $1", table)
+		err := db.QueryRow(query, shortUrl).Scan(&longUrl)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				http.Error(w, "Short URL not found", http.StatusNotFound)
+			} else {
+				http.Error(w, "Error querying the database", http.StatusInternalServerError)
+				log.Printf("Failed to query database: %s", err)
+			}
+			return
+		}
+		fmt.Println(shortUrl)
+		fmt.Println(longUrl)
+		response := UrlMessage{
+			ShortUrl: shortUrl,
+			LongUrl:  longUrl,
+			GlobalID: 0,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
+}
+func queryByGlobalID(db *sql.DB, table string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		globalID := r.URL.Query().Get("globalID")
+		if globalID == "" {
+			http.Error(w, "Missing globalID parameter", http.StatusBadRequest)
+			return
+		}
+
+		globalIDInt, err := strconv.ParseInt(globalID, 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid globalID parameter", http.StatusBadRequest)
+			return
+		}
+
+		var shortUrl, longUrl string
+		query := fmt.Sprintf("SELECT short_url, long_url FROM %s WHERE global_id = $1", table)
+		err = db.QueryRow(query, globalIDInt).Scan(&shortUrl, &longUrl)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				http.Error(w, "Global ID not found", http.StatusNotFound)
+			} else {
+				http.Error(w, "Error querying the database", http.StatusInternalServerError)
+				log.Printf("Failed to query database: %s", err)
+			}
+			return
+		}
+
+		response := UrlMessage{
+			ShortUrl: shortUrl,
+			LongUrl:  longUrl,
+			GlobalID: globalIDInt,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
+}
 func main() {
 	shardFlag := flag.Int("shard", 0, "shard id")
-	//portFlag := flag.String("port", ":9000", "Port")
+	portFlag := flag.String("port", ":10000", "Port")
 	flag.Parse()
 	//port := *portFlag
 	shard := *shardFlag
 	table := "urlsh" + strconv.Itoa(int(shard))
 	fmt.Println(table)
-	//port := *portFlag
+	port := *portFlag
 
 	// Construct the connection string
 	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
@@ -66,6 +133,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error pinging database: %q", err)
 	}
+	// Start HTTP server for serving read queries
+	http.HandleFunc("/queryByShortUrl", queryByShortUrl(db, table))
+	http.HandleFunc("/queryByGlobalID", queryByGlobalID(db, table))
+
+	go func() {
+		fmt.Printf("DB server started on %s\n", port)
+		log.Fatal(http.ListenAndServe(port, nil))
+	}()
 
 	serverURL := "ws://localhost:8080/dbregister"
 
@@ -77,6 +152,7 @@ func main() {
 	headers.Set("shard-id", strconv.Itoa(int(shard)))
 	headers.Set("db-conn-str", psqlInfo)
 	headers.Set("table-name", table)
+	headers.Set("read-server-port", port)
 
 	fmt.Println(shard)
 	// Dial the server and upgrade the connection to WebSocket
