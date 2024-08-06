@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,6 +26,8 @@ const (
 	DBAddition
 	DBFailure
 )
+
+var maxShardID = -1
 
 // String returns the string representation of the EventType.
 func (et EventType) String() string {
@@ -71,8 +72,8 @@ var (
 
 	// Services map to hold active connections
 	services   = make(map[string]Service)
-	dbMap      = make(map[int]DBConn)
-	dbs        = make([]DBConn, 0)
+	dbMap      = make(map[int]DBService)
+	dbs        = make([]DBService, 0)
 	servicesMu sync.Mutex
 	dbsMu      sync.Mutex
 
@@ -96,11 +97,15 @@ type Service struct {
 	serverID       string
 }
 
-type DBConn struct {
-	Connstr  string
+type DBService struct {
+	Conn     *websocket.Conn
 	shardID  int
 	rowCount int64
 	active   bool
+	// IP        string
+	// Port      string
+	Address   string
+	TableName string
 }
 
 // RequestBody struct to parse the request body
@@ -180,6 +185,10 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	handleWebSocketConnection(service, backendConn)
 }
 
+type DBShardID struct {
+	ID int `json:"id"`
+}
+
 // handleWebSocketConnection handles the WebSocket connection with backendServer and removes it from the services map on disconnection
 func handleWebSocketConnection(service Service, backendConn *websocket.Conn) {
 	defer func() {
@@ -192,11 +201,58 @@ func handleWebSocketConnection(service Service, backendConn *websocket.Conn) {
 		serviceEvents <- NewEvent(ServerFailure, service.ClientHTTPIP+service.clientHTTPPort, service.serverID, "", "") //Send a signal to service Events channel
 	}()
 	//blocking operation that does nothing, i just want to keep control in listener till backend server is alive
-	_, message, err := backendConn.ReadMessage()
-	if err != nil {
-		log.Println("Backend read error:", err)
+	for {
+		ID := -1
+		if len(dbs) == 1 {
+			ID = dbs[0].shardID
+		}
+		if len(dbs) > 1 {
+			ID = dbs[0].shardID //last Shard is only for replicated values, since i+1th shard stores replicated values of ith shard
+			if ID == maxShardID {
+				ID = dbs[1].shardID
+			}
+		}
+		err := backendConn.WriteJSON(
+			DBShardID{
+				ID: ID,
+			})
+		if err != nil {
+			log.Println("Cant Send Shard ID")
+		}
+		time.Sleep(time.Second * 5)
 	}
-	log.Println(message)
+
+}
+
+// Received from DB Servers
+type DBInfo struct {
+	NumRows int64 `json:"numRows"`
+}
+
+func handleWebSocketConnectionDB(db DBService, dbConn *websocket.Conn) {
+	defer func() {
+		db.Conn.Close()
+		db.active = false
+		dbMap[db.shardID] = db
+		fmt.Println("DB Down")
+		//dbConn.Close()
+	}()
+	//blocking operation that does nothing, i just want to keep control in listener till backend server is alive
+	for {
+		//message is number of rows in db
+		info := DBInfo{NumRows: 0}
+		err := dbConn.ReadJSON(&info)
+		if err != nil {
+			log.Println("db read error:", err)
+			break
+		}
+		if info.NumRows == -1 {
+			break
+		}
+		fmt.Println(db.shardID, info.NumRows)
+		db.rowCount = info.NumRows
+		dbMap[db.shardID] = db
+	}
 
 }
 
@@ -290,6 +346,9 @@ func findShardID(r *http.Request) string {
 func findDBConnStr(r *http.Request) string {
 	return r.Header.Get("db-conn-str")
 }
+func findTableName(r *http.Request) string {
+	return r.Header.Get("table-name")
+}
 
 // handle DB events
 func handleDBRegister(w http.ResponseWriter, r *http.Request) {
@@ -303,101 +362,89 @@ func handleDBRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "shard-id header not integer", http.StatusBadRequest)
 		return
 	}
+	maxShardID = max(maxShardID, shardIDInt)
 
 	dbconnstr := findDBConnStr(r)
 	if dbconnstr == "" {
 		http.Error(w, "db-conn-str not found", http.StatusBadRequest)
 		return
 	}
+	tableName := findTableName(r)
+	if tableName == "" {
+		http.Error(w, "table-name not found", http.StatusBadRequest)
+		return
+	}
+	Address := r.RemoteAddr
+	// clientHTTPPort := findClientPort(r)
+	// if clientHTTPPort == "" {
+	// 	http.Error(w, "client-http-port header not found", http.StatusBadRequest)
+	// 	return
+	// }
 
-	log.Printf("shard-id: %s, db-conn-str %ss\n", shardID, dbconnstr)
-
-	db := DBConn{
-		shardID:  shardIDInt,
-		Connstr:  dbconnstr,
-		rowCount: 0,
-		active:   false,
+	log.Printf("shard-id: %s, db-conn-str %s, table-name: %s, address: %s\n", shardID, dbconnstr, tableName, Address)
+	dbConn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	db := DBService{
+		shardID:   shardIDInt,
+		Conn:      dbConn,
+		rowCount:  0,
+		active:    true,
+		TableName: tableName,
+		Address:   Address,
 	}
 	dbsMu.Lock()
 	//dbs = append(dbs, db)
 	dbMap[shardIDInt] = db
 	dbsMu.Unlock()
+	handleWebSocketConnectionDB(db, dbConn)
 }
 
 // monitor DB
 func pingDBs() {
 	for {
 		dbsMu.Lock()
-		for shardID, db := range dbMap {
-			conn, err := sql.Open("postgres", db.Connstr)
-			if err != nil {
-				log.Printf("Failed to connect to DB: %v", err)
-				db.active = false
-				dbMap[shardID] = db
-				continue
-			}
-
-			err = conn.Ping()
-			if err != nil {
-				log.Printf("Failed to ping DB: %v", err)
-				db.active = false
-				dbMap[shardID] = db
-				conn.Close()
-				continue
-			}
-
-			var rowCount int
-			err = conn.QueryRow("SELECT COALESCE(MAX(localid), 0) FROM urlsh1").Scan(&rowCount)
-			if err != nil {
-				log.Printf("Failed to get row count: %v", err)
-				db.active = false
-				dbMap[shardID] = db
-				conn.Close()
-				continue
-			}
-
-			db.rowCount = rowCount
-			db.active = true
-			dbMap[shardID] = db
-			conn.Close()
-		}
-
-		dbs = dbs[:0]
+		dbs = make([]DBService, 0)
 		for _, db := range dbMap {
-			if db.Active {
+			if db.active {
 				dbs = append(dbs, db)
 			}
 		}
 
 		sort.Slice(dbs, func(i, j int) bool {
-			return dbs[i].RowCount < dbs[j].RowCount
+			return dbs[i].rowCount < dbs[j].rowCount
 		})
 
 		dbsMu.Unlock()
+		fmt.Println(dbs)
 
 		time.Sleep(5 * time.Second)
 	}
 }
 
-func handleListDBs(w http.ResponseWriter, r *http.Request) {
-	dbsMu.Lock()
-	defer dbsMu.Unlock()
+// func handleListDBs(w http.ResponseWriter, r *http.Request) {
+// 	dbsMu.Lock()
+// 	defer dbsMu.Unlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	err := json.NewEncoder(w).Encode(dbs)
-	if err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-	}
-}
+//		w.Header().Set("Content-Type", "application/json")
+//		err := json.NewEncoder(w).Encode(dbs)
+//		if err != nil {
+//			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+//		}
+//	}
 func main() {
 	// Define the port flag
 	port := flag.String("port", "8080", "port to listen on")
 	flag.Parse()
 
 	http.HandleFunc("/register", handleRegister)
+	http.HandleFunc("/dbregister", handleDBRegister)
 	http.HandleFunc("/getServices", getServices)
 	address := "localhost:" + *port
 	log.Printf("Server started on %s\n", address)
+	go pingDBs()
 	err := http.ListenAndServe(address, nil)
 	if err != nil {
 		log.Fatal("ListenAndServe error:", err)
