@@ -192,7 +192,7 @@ func main() {
 			// Process the message (e.g., insert into the database)
 			// Insert the received data into the database
 			query := fmt.Sprintf("INSERT INTO %s (global_id, short_url, long_url) VALUES ($1, $2, $3)", table)
-			_, err = db.Exec(query, shard, urlMessage.ShortUrl, urlMessage.LongUrl, urlMessage.GlobalID)
+			_, err = db.Exec(query, urlMessage.GlobalID, urlMessage.ShortUrl, urlMessage.LongUrl)
 			if err != nil {
 				log.Printf("Failed to insert data into database: %s", err)
 			} else {

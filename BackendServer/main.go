@@ -182,11 +182,11 @@ func main() {
 		}
 
 		shardIDCopy := shardID.ID
-		IDGen.mu.Lock()
+		fmt.Println("Generating ID")
 		generatedID := IDGen.GenerateID()
-		IDGen.mu.Unlock()
+		fmt.Println("Generated ID")
 		shortUrl := EncodeBase62(int64(shardIDCopy)) + EncodeBase62(int64(generatedID)) //First Letter Shard ID for Routing to Shard
-		fmt.Println(shortUrl)
+		fmt.Println("ShortURl: ", shortUrl)
 		message := UrlMessage{
 			ShortUrl: shortUrl,
 			LongUrl:  longUrl,
