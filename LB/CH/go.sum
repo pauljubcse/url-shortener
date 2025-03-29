@@ -2,3 +2,5 @@ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aN
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/pauljubcse/consistent_hashing v0.0.0-20240726190238-3c994e997050 h1:fhKw7ODR5C2Vx8WqIvo2zBRaqPXsO6p9I1+76Z0TKOk=
 github.com/pauljubcse/consistent_hashing v0.0.0-20240726190238-3c994e997050/go.mod h1:bfWXub2xRkJzPsR38ec9sKTSqhKaJUKXlUqWWDslY4s=
+github.com/pauljubcse/in_memory_cache v0.0.0-20250329221806-9b32728a347c h1:JSoV59IZWZlEigjRSB/2nRFD5dgvhK2deWuvONOkm4s=
+github.com/pauljubcse/in_memory_cache v0.0.0-20250329221806-9b32728a347c/go.mod h1:nsBfp9buTTY1/wM6HRzB2Ra+kcy8mwx4vrNbtsfDN+k=
