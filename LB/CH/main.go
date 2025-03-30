@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pauljubcse/consistent_hashing"
 	"github.com/pauljubcse/in_memory_cache"
+	"github.com/pauljubcse/kvsclient"
+	"github.com/pauljubcse/ratelimiter"
 	//"net/url"
 	//"sync/atomic"
 )
@@ -120,7 +123,8 @@ func (lb *LoadBalancer) getNextBackend(key string) (string, error) {
 
 
 var cache *in_memory_cache.LRUCache[string, string]
-
+var kvsClient *kvsclient.Client
+var rateLimiter *ratelimiter.TokenBucket
 
 // handlers
 func root(w http.ResponseWriter, req *http.Request) { //Worker Go Routine
@@ -288,6 +292,16 @@ func postLongUrl(w http.ResponseWriter, req *http.Request) {
 // }
 
 func getLongUrl(w http.ResponseWriter, req *http.Request) {
+	//Rate Limiting on IP
+	ip, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		fmt.Println("Error getting IP address:", err)
+	}
+	fmt.Println(ip)
+	if !rateLimiter.Allow(ip) {
+		fmt.Println("Rate limit exceeded for IP:", req.RemoteAddr)
+		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+	}
 	// Extract shortUrl from the URL path
 	shortUrl := strings.TrimPrefix(req.URL.Path, "/")
 	// Parse the shortUrl query parameter from the incoming request
@@ -305,6 +319,7 @@ func getLongUrl(w http.ResponseWriter, req *http.Request) {
 		fmt.Println("Cache miss for shortUrl:", shortUrl)
 	}
 
+	
 	// // Create an HTTP client with a timeout
 	// relay := &http.Client{
 	// 	Timeout: time.Duration(lb.backendTimeout) * time.Second,
@@ -361,9 +376,9 @@ func getLongUrl(w http.ResponseWriter, req *http.Request) {
 	// 	return
 	// }
 
-	cache.Put(shortUrl, "urlResp.LongUrl") // Cache the long URL
+	cache.Put(shortUrl, "https://www.google.com") // Cache the long URL
 	// Redirect to the long URL
-	http.Redirect(w, req, "urlResp.LongUrl", http.StatusFound)
+	http.Redirect(w, req, "https://www.google.com", http.StatusFound)
 }
 
 // general purpose function for receiving events via websocket
@@ -448,7 +463,35 @@ func main() {
 	}
 
 	cache = in_memory_cache.NewLRUCache[string, string](1000) // 1000 is the cache size
+	kvsClient, err := kvsclient.NewClient("ws://localhost:9080/ws")
+	if err != nil {
+		log.Fatalf("Failed to create KVS client: %v", err)	
+	}
 
+	// Ping and Check KV Store and Client
+	domain := "test_domain"
+	err = kvsClient.CreateDomain(domain)
+	if err != nil {
+		log.Fatalf("Error creating domain: %v", err)
+	}
+	key := "counter"
+	initialValue := "0"
+	err = kvsClient.SetString(domain, key, initialValue)
+	if err != nil {
+		log.Fatalf("Error setting string: %v", err)
+	}else{
+		fmt.Println("Client and Store Running")
+	}
+
+	// Set up a rate limiter with a limit of 10 requests per second
+	rl := ratelimiter.NewTokenBucket(kvsClient, domain, 10, 1) // 10 sec interval, 1 token per interval
+	fmt.Println("Trial 1 for Rate Limiter:", rl.Allow("1")) // Allow 1 token for the first request
+	fmt.Println("Trial 2 for Rate Limiter:", rl.Allow("1")) // Allow 1 token for the first request
+	fmt.Println("Trial 3 for Rate Limiter:", rl.Allow("2")) // Allow 1 token for the first request
+	//Expect True False True
+
+	rateLimiter = ratelimiter.NewTokenBucket(kvsClient, domain, 10, 2) // 20 sec interval, 1 token per interval
+		
 	//to relay requests to backend servers
 	http.HandleFunc("/hello", root)
 	http.HandleFunc("/postLongUrl", postLongUrl)
